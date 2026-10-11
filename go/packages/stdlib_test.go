@@ -58,6 +58,9 @@ func TestStdlibMetadata(t *testing.T) {
 }
 
 func TestCgoOption(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("net.cgoLookupHost does not exist on windows")
+	}
 	if testing.Short() {
 		t.Skip("skipping in short mode; uses tons of memory (https://golang.org/issue/14113)")
 	}

@@ -1,0 +1,76 @@
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional go test package/pattern selector; empty runs the full suite"
+        required: false
+        default: ""
+
+jobs:
+  module-zip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Build module zip
+        run: |
+          set -euo pipefail
+          VERSION=v0.0.0-20190606124116-d0a3d012864b
+          HELPER=$(mktemp -d)
+          cp .github/create_mod.go "$HELPER/main.go"
+          (cd "$HELPER" && go mod init helper && go get golang.org/x/mod@v0.24.0 && go build -o "$HELPER/create_mod" main.go)
+          STAGE=$(mktemp -d)
+          tar --exclude=./.git --exclude=./.github -cf - . | tar -xf - -C "$STAGE"
+          mkdir -p "$RUNNER_TEMP/dist"
+          "$HELPER/create_mod" "$STAGE" golang.org/x/tools "$VERSION" "$RUNNER_TEMP/dist/$VERSION.zip"
+          COUNT=$(unzip -Z1 "$RUNNER_TEMP/dist/$VERSION.zip" | wc -l)
+          echo "zip entries: $COUNT"
+          test "$COUNT" -eq 1118
+          if unzip -Z1 "$RUNNER_TEMP/dist/$VERSION.zip" | grep -F '/.github/'; then echo "workflow leaked into zip"; exit 1; fi
+          mkdir -p dist && cp "$RUNNER_TEMP/dist/$VERSION.zip" dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go: ["1.12"]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GO111MODULE: "on"
+      GOPROXY: https://proxy.golang.org
+      CGO_ENABLED: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Go version
+        run: go version && go env
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: |
+          set -o pipefail
+          go test -v -p 1 ${{ inputs.test-filter || './...' }} 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+      - name: Test summary
+        if: always()
+        run: |
+          awk '/^--- PASS/{p++} /^--- FAIL/{f++} /^--- SKIP/{s++} /^ok /{okp++} /^FAIL/{fp++} END{printf "TEST SUMMARY: %d tests passed, %d failed, %d skipped; %d packages ok, %d packages FAIL\n", p, f, s, okp, fp}' "$RUNNER_TEMP/go-test.log"
